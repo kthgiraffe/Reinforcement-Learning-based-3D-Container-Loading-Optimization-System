@@ -1,5 +1,4 @@
 # 3_agent.py
-
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
@@ -9,101 +8,91 @@ from collections import deque
 from model import TransformerModel
 
 class DQNAgent:
-    def __init__(self, state_dim, num_boxes, container_dims, lr=1e-4, gamma=0.99, buffer_size=10000, batch_size=64):
-        self.state_dim = state_dim
-        self.num_boxes = num_boxes
-        self.num_orientations = 6
-        self.container_dims = container_dims
-        self.pos_dim = container_dims[0] * container_dims[1] * container_dims[2]
-        self.gamma = gamma
-        self.batch_size = batch_size
+    """DQN 알고리즘을 구현한 에이전트 클래스"""
+    def __init__(self, model_params, lr=1e-4, gamma=0.99, buffer_size=20000, batch_size=128):
+        self.gamma = gamma  # 미래 보상에 대한 감가율
+        self.batch_size = batch_size  # 한 번에 학습할 경험의 수
+        self.num_box_actions = model_params['num_box_actions']
         
-        # 기본 모델과 목표 모델(Target Network) 생성
-        self.policy_net = TransformerModel(state_dim, num_boxes, self.num_orientations, container_dims)
-        self.target_net = TransformerModel(state_dim, num_boxes, self.num_orientations, container_dims)
+        # 실제 학습에 사용될 정책망(policy_net)과 목표값 계산에 사용될 목표망(target_net)
+        self.policy_net = TransformerModel(model_params)
+        self.target_net = TransformerModel(model_params)
         self.target_net.load_state_dict(self.policy_net.state_dict())
-        self.target_net.eval() # 평가 모드
+        self.target_net.eval() # 목표망은 학습하지 않으므로 평가 모드로 설정
 
         self.optimizer = optim.Adam(self.policy_net.parameters(), lr=lr)
-        self.memory = deque(maxlen=buffer_size)
+        self.memory = deque(maxlen=buffer_size) # 경험을 저장할 리플레이 버퍼
 
-    def select_action(self, state, epsilon):
-        """Epsilon-Greedy 방식으로 행동 선택"""
-        if random.random() > epsilon: # Greedy action
-            with torch.no_grad():
-                state_tensor = torch.FloatTensor(state).unsqueeze(0)
+    def _state_to_tensor(self, state):
+        """상태 딕셔너리를 PyTorch 텐서로 변환합니다."""
+        return {k: torch.FloatTensor(v).unsqueeze(0) for k, v in state.items()}
+
+    def select_action(self, state, env, epsilon):
+        """Epsilon-Greedy 정책에 따라 행동을 선택합니다."""
+        # Epsilon 확률로 무작위 행동(탐험), 1-Epsilon 확률로 최적 행동(활용)
+        if random.random() > epsilon:
+            with torch.no_grad(): # 평가 시에는 그래디언트 계산 불필요
+                state_tensor = self._state_to_tensor(state)
                 q_box, q_orientation, q_position = self.policy_net(state_tensor)
                 
-                box_idx = q_box.argmax(1).item()
+                # 마스킹: 현재 놓을 수 없는 상자 선택지를 제외
+                mask = torch.zeros_like(q_box)
+                num_remaining = len(env.remaining_boxes)
+                if num_remaining < self.num_box_actions:
+                    mask[:, num_remaining:] = -1e9 # Q-value를 매우 낮춰 선택되지 않게 함
+                
+                box_idx = (q_box + mask).argmax(1).item()
                 orientation_idx = q_orientation.argmax(1).item()
-                pos_flat_idx = q_position.argmax(1).item()
-                position = np.unravel_index(pos_flat_idx, self.container_dims)
-        else: # Random action
-            box_idx = random.randrange(self.num_boxes)
-            orientation_idx = random.randrange(self.num_orientations)
-            position = (random.randrange(self.container_dims[0]),
-                        random.randrange(self.container_dims[1]),
-                        random.randrange(self.container_dims[2]))
+                position_relative = q_position.squeeze(0).cpu().numpy()
+        else: # 무작위 행동 (탐험)
+            box_idx = random.randrange(min(len(env.remaining_boxes), self.num_box_actions))
+            orientation_idx = random.randrange(6)
+            position_relative = np.random.rand(3)
 
-        return box_idx, orientation_idx, position
+        return box_idx, orientation_idx, position_relative
 
     def store_transition(self, state, action, reward, next_state, done):
-        """경험을 리플레이 버퍼에 저장"""
+        """경험(S, A, R, S')을 리플레이 버퍼에 저장합니다."""
         self.memory.append((state, action, reward, next_state, done))
 
     def learn(self):
-        """리플레이 버퍼에서 샘플링하여 모델 학습"""
+        """리플레이 버퍼에서 경험을 샘플링하여 모델을 학습합니다."""
         if len(self.memory) < self.batch_size:
-            return
+            return # 버퍼에 데이터가 충분히 쌓일 때까지 기다림
 
+        # 버퍼에서 배치 크기만큼의 경험을 무작위로 샘플링
         transitions = random.sample(self.memory, self.batch_size)
-        batch_state, batch_action, batch_reward, batch_next_state, batch_done = zip(*transitions)
-
-        # 데이터를 텐서로 변환
-        state_batch = torch.FloatTensor(np.array(batch_state))
-        reward_batch = torch.FloatTensor(batch_reward)
-        next_state_batch = torch.FloatTensor(np.array(batch_next_state))
-        done_batch = torch.FloatTensor(batch_done)
-
-        # 행동 인덱스 분리
-        box_actions = torch.LongTensor([a[0] for a in batch_action])
-        orient_actions = torch.LongTensor([a[1] for a in batch_action])
-        pos_flat_actions = torch.LongTensor([np.ravel_multi_index(a[2], self.container_dims) for a in batch_action])
-
-        # 1. 현재 Q-Value 계산
-        q_box, q_orientation, q_position = self.policy_net(state_batch)
         
-        q_box_current = q_box.gather(1, box_actions.unsqueeze(1))
-        q_orient_current = q_orientation.gather(1, orient_actions.unsqueeze(1))
-        q_pos_current = q_position.gather(1, pos_flat_actions.unsqueeze(1))
+        # 상태 딕셔너리 재구성 (배치 처리를 위해)
+        states = {k: torch.FloatTensor(np.array([t[0][k] for t in transitions])) for k in transitions[0][0]}
+        next_states = {k: torch.FloatTensor(np.array([t[3][k] for t in transitions])) for k in transitions[0][3]}
         
-        # 각 행동 요소의 Q-value를 합산하여 최종 Q-value 계산 (단순화된 방식)
-        current_q = (q_box_current + q_orient_current + q_pos_current) / 3
+        actions = [t[1] for t in transitions]
+        rewards = torch.FloatTensor([t[2] for t in transitions])
+        dones = torch.FloatTensor([t[4] for t in transitions])
 
-        # 2. 목표 Q-Value 계산
+        box_actions = torch.LongTensor([a[0] for a in actions]).unsqueeze(1)
+        orient_actions = torch.LongTensor([a[1] for a in actions]).unsqueeze(1)
+        
+        # 1. 현재 Q-Value 계산: Q(s, a)
+        q_box, q_orient, _ = self.policy_net(states)
+        current_q_box = q_box.gather(1, box_actions)
+        current_q_orient = q_orient.gather(1, orient_actions)
+        current_q = (current_q_box + current_q_orient) / 2 # Q-value 단순 평균
+
+        # 2. 목표 Q-Value 계산: R + γ * max_a' Q(s', a')
         with torch.no_grad():
-            next_q_box, next_q_orient, next_q_pos = self.target_net(next_state_batch)
-            
-            # 다음 상태에서 가장 큰 Q-value 선택
-            max_next_q_box = next_q_box.max(1)[0]
-            max_next_q_orient = next_q_orient.max(1)[0]
-            max_next_q_pos = next_q_pos.max(1)[0]
-            
-            # 각 요소를 평균내어 다음 상태의 Q-value 계산
-            max_next_q = (max_next_q_box + max_next_q_orient + max_next_q_pos) / 3
-            
-            # 벨만 방정식 적용
-            target_q = reward_batch + (1 - done_batch) * self.gamma * max_next_q
+            next_q_box, next_q_orient, _ = self.target_net(next_states)
+            max_next_q = (next_q_box.max(1)[0] + next_q_orient.max(1)[0]) / 2
+            target_q = rewards + (1 - dones) * self.gamma * max_next_q
 
-        # 3. 손실 함수 계산 및 모델 업데이트
+        # 3. 손실(Loss) 계산 및 모델 업데이트
         loss = F.mse_loss(current_q.squeeze(), target_q)
-        
         self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
-        
-        return loss.item()
+        loss.backward() # 역전파
+        self.optimizer.step() # 정책망의 가중치 업데이트
 
-    def update_target_net(self):
-        """목표 모델의 가중치를 현재 모델의 가중치로 업데이트"""
-        self.target_net.load_state_dict(self.policy_net.state_dict())
+    def soft_update(self, tau=1e-3):
+        """목표망을 정책망 쪽으로 서서히 업데이트하여 학습 안정성 향상"""
+        for target_param, policy_param in zip(self.target_net.parameters(), self.policy_net.parameters()):
+            target_param.data.copy_(tau * policy_param.data + (1.0 - tau) * target_param.data)
