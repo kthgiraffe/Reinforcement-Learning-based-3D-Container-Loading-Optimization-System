@@ -76,9 +76,9 @@ def main():
         # Epsilon 값을 점차 감소시켜 탐험의 비중을 줄임
         epsilon = max(EPSILON_END, epsilon * EPSILON_DECAY)
         
-        # 100 에피소드마다 학습 결과 출력
-        if (episode + 1) % 100 == 0:
-            print(f"\nEpisode {episode+1}, Score: {total_reward:.2f}, UR: {env.container.get_utilization_rate():.2%}, Epsilon: {epsilon:.3f}")
+        # 50번 에피소드마다 학습 결과 출력
+        if (episode + 1) % 50 == 0:
+            tqdm.write(f"Episode {episode+1}, Score: {total_reward:.2f}, UR: {env.container.get_utilization_rate():.2%}, Epsilon: {epsilon:.3f}")
 
     # 4. 학습 완료 후 모델 저장
     print("Training finished. Saving model...")
