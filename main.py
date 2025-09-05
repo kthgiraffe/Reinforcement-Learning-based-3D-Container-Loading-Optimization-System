@@ -62,6 +62,9 @@ def main():
         state = env.reset()
         done = False
         total_reward = 0
+
+        step_count = 0
+        max_step = 2500
         
         # 3. 한 에피소드가 끝날 때까지 반복
         while not done:
@@ -72,6 +75,9 @@ def main():
             agent.soft_update() # 목표망 소프트 업데이트
             state = next_state
             total_reward += reward
+
+            if step_count >= max_step and not done:
+                done = True
         
         # Epsilon 값을 점차 감소시켜 탐험의 비중을 줄임
         epsilon = max(EPSILON_END, epsilon * EPSILON_DECAY)
