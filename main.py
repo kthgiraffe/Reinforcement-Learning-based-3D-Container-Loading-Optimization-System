@@ -68,6 +68,8 @@ def main():
         
         # 3. 한 에피소드가 끝날 때까지 반복
         while not done:
+            step_count += 1
+
             action = agent.select_action(state, env, epsilon)
             next_state, reward, done = env.step(action)
             agent.store_transition(state, action, reward, next_state, done)
